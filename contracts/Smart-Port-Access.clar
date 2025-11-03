@@ -20,6 +20,7 @@
 (define-constant err-insufficient-balance (err u105))
 (define-constant err-container-in-transit (err u106))
 (define-constant err-invalid-status (err u107))
+(define-constant err-batch-operation-failed (err u108))
 
 (define-data-var container-id-nonce uint u1)
 
@@ -181,6 +182,29 @@
     )
 )
 
+(define-public (batch-ship-containers (token-ids (list 10 uint)))
+    (let
+        (
+            (results (map ship-container-internal token-ids))
+        )
+        (asserts! (is-all-successful results) err-batch-operation-failed)
+        (ok (len token-ids))
+    )
+)
+
+(define-public (batch-unload-containers (token-ids (list 10 uint)))
+    (begin
+        (asserts! (is-port-authorized tx-sender) err-port-not-authorized)
+        (let
+            (
+                (results (map unload-container-internal token-ids))
+            )
+            (asserts! (is-all-successful results) err-batch-operation-failed)
+            (ok (len token-ids))
+        )
+    )
+)
+
 (define-public (emergency-withdraw-container (token-id uint))
     (match (map-get? containers token-id)
         container-data (begin
@@ -257,6 +281,60 @@
                           acc)
         acc
     )
+)
+
+(define-private (ship-container-internal (token-id uint))
+    (match (map-get? containers token-id)
+        container-data (begin
+            (if (and (is-eq tx-sender (get owner container-data)) (is-eq (get status container-data) "loaded"))
+                (begin
+                    (map-set containers token-id (merge container-data { status: "in-transit" }))
+                    true
+                )
+                false
+            )
+        )
+        false
+    )
+)
+
+(define-private (unload-container-internal (token-id uint))
+    (match (map-get? containers token-id)
+        container-data (begin
+            (if (and (is-eq (get status container-data) "in-transit") (not (get paid container-data)))
+                (let
+                    (
+                        (owner (get owner container-data))
+                        (fee-amount (get fee-amount container-data))
+                        (user-balance (default-to u0 (map-get? user-balances owner)))
+                    )
+                    (if (>= user-balance fee-amount)
+                        (begin
+                            (unwrap-panic (as-contract (stx-transfer? fee-amount tx-sender tx-sender)))
+                            (map-set user-balances owner (- user-balance fee-amount))
+                            (map-set containers token-id (merge container-data {
+                                status: "unloaded",
+                                unloaded-at: (some stacks-block-height),
+                                paid: true
+                            }))
+                            true
+                        )
+                        false
+                    )
+                )
+                false
+            )
+        )
+        false
+    )
+)
+
+(define-private (is-all-successful (results (list 10 bool)))
+    (fold and-reducer results true)
+)
+
+(define-private (and-reducer (item bool) (accumulator bool))
+    (and item accumulator)
 )
 
 (define-read-only (get-contract-balance)
